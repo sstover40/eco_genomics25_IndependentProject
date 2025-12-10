@@ -1,0 +1,853 @@
+---
+title: "GOcomparison_AHdata"
+output: html_document
+date: "2025-11-24"
+---
+
+This is comparing specific genes associated with GO terms(involved with TE regulation) during and after thermal stress
+
+1. Are these genes DE during or after environmental stress?
+2. Are all of them upregulated, downregulated, or a mix?/ do they have similar behaviors? (WGCNA)
+3. If these genes respond to environmental stress, is there a difference in regulation after 1 generation of OW or 25 generations?
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#to set our working dir
+knitr::opts_knit$set(root.dir = "/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/data/")
+```
+
+Steps: 
+1. Isolate gene list from the two TE regulator GO terms (GO:0006313; GO:0032197)
+2. Observe how their expression changes after 1 gen of stress
+3. Expand to other TE regulator GO terms 
+4. determine if any are enriched after 1 gen of stress 
+5. determine if any are enriched after 25 generations of thermal stress 
+```{r}
+library(cluster)
+library(clusterProfiler)
+library(tidyverse)
+
+```
+##Isolating the genes in the GO terms mentioned by Brennan et al. 2025 PNAS
+there were only 2 mentioned to be enriched that also had to do with TE regulating 
+transcriptome GO annotations were from the A. tonsa transcriptome provided in class 
+```{r}
+
+# Annotation file 
+#Read GO terms file (tonsa_go) provided in /gpfs1/cl/ecogen/pbio6800/Transcriptomics/enrichment and copied into data dir
+tonsa_go <- read.delim("Genes_GO_terms_output.tsv", header = TRUE) %>%
+  dplyr::slice(-c(1,2)) %>%  # remove header rows if present
+  separate_rows(GO, sep=";") %>% 
+  mutate(GO = trimws(GO)) %>%
+  na.omit()  # remove missing GO annotations
+
+#Gene-2-GO mapping for clusterProfiler: list where names = geneIDs values = Vector of GO IDs for that gene 
+gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
+
+#check
+#gene2go[1:3]
+
+go_id <- c("GO:0006313","GO:0032197")   # Recombination and recombination regulation
+
+#extracting genes that belong to the specific GO terms of interest
+genes_by_term <- lapply(go_id, function(go) {
+  # select genes where the GO term is in their vector of GO terms
+  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
+})
+names(genes_by_term) <- go_id
+genes_by_term
+
+#checking the raw data just in case. Should be the same # of genes in genes_for_terms
+tonsa_go %>% filter(GO %in% go_id) %>% pull(geneID)  
+
+#looks the same! the 2 go terms share all 7 genes it seems hence 0 in the second category
+```
+
+Converting the list of genes into a separate CSV data table for further analysis: 
+```{r}
+#convert to df of genes of interest
+genes_df <- do.call(
+  rbind,
+  lapply(names(genes_by_term), function(go) {
+    genes <- genes_by_term[[go]]
+    
+    if (length(genes) == 0) {
+      # return a properly shaped empty data frame
+      return(data.frame(
+        GeneID = character(0),
+        GO = character(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # normal case, no GO terms with 0 genes 
+    data.frame(
+      GeneID = genes,
+      GO = go,
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+#save as table 
+#write.csv(genes_df,"genes_by_GOterms.csv", row.names = FALSE)
+genes_df
+```
+7 genes total, all found in category GO:0006313
+
+Uploading Expression Matrices and Metadata  
+```{r} 
+## Import the libraries that we're likely to need in this session
+
+library(DESeq2)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+library(vsn)  
+library("pheatmap")
+library("vsn")
+
+####################################################
+### Import our data
+####################################################
+ 
+# Import the counts matrix from 1 gen stress (Alison's experiment)
+counts_1gen <- read.table("AH_data/AH_counts_matrix.txt", header=TRUE, row.names=1)
+head(counts_1gen)
+dim(counts_1gen)
+
+counts_1gen_round <- round(counts_1gen) # bc DESeq2 doesn't like decimals (and Salmon outputs data with decimals)
+head(counts_1gen_round)
+colnames(counts_1gen_round) <- sub("^(.*?R[0-9]).*", "\\1", colnames(counts_1gen_round))
+ #changing column names to match metadata table 
+
+
+#import the sample description table
+metadata_1gen <- read.delim("AH_data/metadata.txt", header=TRUE, stringsAsFactors = TRUE, row.names=1)
+head(metadata_1gen)
+```
+
+Make DESeq Object: 
+```{r}
+ ####################################################
+
+### Start working with DESeq2!
+
+####################################################
+
+#### Create a DESeq object and define the experimental design here with the tilda
+
+dds <- DESeqDataSetFromMatrix(countData = counts_1gen_round, colData=metadata_1gen, 
+                              design= ~ generation + line)
+
+dim(dds)
+
+# Filter out genes with too few reads - remove all genes with counts < 15 in more than 75% of 24 samples, so 18)
+## suggested by WGCNA on RNAseq FAQ
+
+dds <- dds[rowSums(counts(dds) >= 15) >= 18,]
+nrow(dds) 
+# How many transcripts have at least 15 reads (a.k.a counts) in 75% of the samples
+
+# Run the DESeq model to test for differential gene expression
+
+dds$line <- relevel(dds$line, ref = "control")
+dds$generation <- relevel(dds$generation, ref = "G1")
+
+dds$group <- factor(paste0(dds$line, dds$generation))
+design(dds) <- ~ group
+dds <- DESeq(dds)
+resultsNames(dds)
+
+
+# List generated results
+resultsNames(dds)
+# Copy the results names 
+
+# transform the data using variance stabilization
+vsd <- vst(dds, blind=FALSE)
+
+#Gen1
+resG1_CvT <- results(dds, contrast=c("group","controlG1","treatmentG1"), alpha = 0.05)
+resG1_CvT <- resG1_CvT[order(resG1_CvT$padj),] #sort
+resG1_CvT <- resG1_CvT[!is.na(resG1_CvT$padj),]
+
+#Gen2
+resG2_CvT <- results(dds, contrast=c("group","controlG2","treatmentG2"), alpha = 0.05)
+resG2_CvT <- resG2_CvT[order(resG2_CvT$padj),] #sort
+resG2_CvT <- resG2_CvT[!is.na(resG2_CvT$padj),]
+
+#Gen3
+resG3_CvT <- results(dds, contrast=c("group","controlG3","treatmentG3"), alpha = 0.05)
+resG3_CvT <- resG3_CvT[order(resG3_CvT$padj),] #sort
+resG3_CvT <- resG3_CvT[!is.na(resG3_CvT$padj),]
+
+#Gen4
+resG4_CvT <- results(dds, contrast=c("group","controlG4","treatmentG4"), alpha = 0.05)
+resG4_CvT <- resG4_CvT[order(resG4_CvT$padj),] #sort
+resG4_CvT <- resG4_CvT[!is.na(resG4_CvT$padj),]
+```
+Plotting the Genes of interest (GO:0006313)
+```{r}
+# load library
+library(purrr)
+
+#Gene names 
+gene_list <- genes_df$GeneID[2:3]
+
+#looping over list of genes with map_df: count, line, generation for each gene of interest 
+d_all <- map_df(gene_list, function(g) {
+  d <- plotCounts(dds, gene = g, intgroup = c("line","generation"), returnData = TRUE)
+  d$gene <- g
+  d
+})
+
+#ordering it by time 
+d_all$generation <- factor(d_all$generation, levels = sort(unique(d_all$generation)))
+
+#ggplot with facets for each gene: Gene Expression over Time 
+GE_overT <- ggplot(d_all, aes(x = generation, y = count, color = line, group = line)) +
+  geom_point(position = position_jitter(w = 0.2, h = 0), size = 3, aes(shape = line)) +
+  stat_summary(fun = mean, geom = "line", size = 1.5, aes(group = line), alpha = 0.8) +
+  stat_summary(fun = mean, geom = "point", size = 5, alpha = 0.7) +
+  facet_wrap(~ gene, scales = "free_y", ncol = 3) +
+  theme_minimal(base_size = 18) +
+  scale_color_manual(values = c("control" = "blue", "treatment" = "red")) +
+  theme(panel.grid.major = element_line(colour="grey"))
+
+GE_overT
+
+ggsave("GE_overT.png", GE_overT, width=10, heigh=6, dpi=300)
+
+```
+Only 2 genes are in the DESeq object. 
+1. could be the others were below the cutoff of 15 reads difference 
+2. Trinity annotation different DESeq2 (isoforms removed perhaps?)
+
+--> checking to see if TE regulators are enriched and what genes are involved
+
+##Expanding to other TE regulator GO terms 
+
+What TE regulators are in the transcriptome annotation?
+```{r}
+#loading libraries 
+library(topGO)
+library(GO.db)
+
+#vector of genes involved in aspects of TE regulation:
+TE_GO_terms <- c(
+  # Core transposition processes
+  "GO:0006313", "GO:0032197", "GO:0090491",
+
+  # Transposase & nuclease activity
+  "GO:0004803", "GO:0004519", "GO:0004520",
+
+  # Reverse transcriptase & retrotransposon functions
+  "GO:0003964", "GO:0004175", "GO:0004190",
+
+  # DNA binding / recombination-related (found in many TEs)
+  "GO:0003697", "GO:0004386", "GO:0005524"
+)
+
+#how many are present in the annotated genome?
+present_terms <- TE_GO_terms[TE_GO_terms %in% tonsa_go$GO]
+present_terms
+
+#genes in annotated genome involved in TE regulation
+TE_genes <- tonsa_go %>%
+  filter(GO %in% TE_GO_terms) %>%
+  pull(geneID) %>%
+  unique()
+
+```
+Are these genes enriched after 1 generation of stress? 
+```{r}
+#results from DESeq object G1 treatment vs G1 control
+res_df <- as.data.frame(resG1_CvT)
+res_df$gene <- rownames(res_df)
+
+# Select significant DE genes
+sig_genes <- res_df %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  pull(gene)
+
+#check 
+length(sig_genes)
+
+#make sure there is only one GO term per row in tonsa_go 
+term2gene <- tonsa_go %>%
+  tidyr::separate_rows(GO, sep=";") %>%
+  dplyr::mutate(GO = trimws(GO)) %>%
+  dplyr::select(GO, geneID)
+
+#test TE GO term enrichment: are TE genes among the DE genes? 
+Enrichment_TE <- enricher(
+  gene = sig_genes,
+  TERM2GENE = term2gene %>% filter(GO %in% TE_GO_terms),
+  pAdjustMethod = "BH"
+)
+
+#view results 
+Enrichment_TE@result
+
+```
+No significant enrichment of TE regulation related genes compared to the background. Those that are enriched are not significantly enriched. To look at more detailed response of TE genes as a group instead of just by gene 
+
+GSEA (Gene Set Enrichment Analysis)
+```{r}
+
+# Create ranked list by log2FoldChange
+geneList <- res_df$log2FoldChange
+names(geneList) <- res_df$gene
+
+# Sort decreasing: most upregulated at top
+geneList <- sort(geneList, decreasing = TRUE)
+
+# Ensure one GO term per row
+term2gene <- tonsa_go %>%
+  tidyr::separate_rows(GO, sep=";") %>%
+  dplyr::mutate(GO = trimws(GO)) %>%
+  dplyr::select(GO, geneID)
+
+# Perform GSEA using clusterProfiler
+gsea_res <- GSEA(geneList,
+                 TERM2GENE = term2gene,
+                 pAdjustMethod = "BH",
+                 verbose = FALSE)
+
+
+gsea_TE <- gsea_res@result %>%
+  filter(ID %in% TE_GO_terms) %>%
+  arrange(p.adjust)
+
+gsea_TE
+```
+No trend in TE regulatory genes or genes in any TE regulatory GO terms
+
+
+##WGCNA 
+looking at all DE genes, identifying co-expression modules and testing for enriched TE GO genes
+examining module-trait correlations 
+are there any TE hub genes? 
+
+```{r}
+#copied from the WGCNA completed in class with this dataset 
+## Import the libraries that we're likely to need in this session
+
+library(WGCNA)
+library(tidyverse)
+library(CorLevelPlot)
+library(gridExtra) 
+library(Rmisc)
+
+# Import the phenotypic data 
+
+ULT_trait <- read.csv("AH_data/WGCNA_TraitData.csv", 
+                      header = TRUE, 
+                      stringsAsFactors = FALSE,
+                      row.names = 1)
+                      
+# Make sure ULT_trait is a data frame
+ULT_trait <- as.data.frame(ULT_trait)
+
+
+# the variance stabilized dds object 
+
+# transform normalized counts
+norm.counts <- assay(vsd) %>% 
+  t()
+
+#filter to only look at the samples that we have data for 
+# Filter only samples present in norm.counts
+ULT_trait <- ULT_trait[rownames(ULT_trait) %in% rownames(norm.counts), , drop = FALSE]
+
+# calculate variance for each gene
+gene_vars <- apply(norm.counts, 2, var) #accounts matrix has been transposed so now we are looking across columns 
+
+# keep top 50% most variable genes (adjust proportion as needed)
+n_keep <- floor(length(gene_vars) * 0.5) #
+high_var_genes <- names(sort(gene_vars, decreasing = TRUE))[1:n_keep] #keeping the most variable ones 1:n
+
+#variance is variance in normalized gene expression across all samples, calculated one gene at a time 
+
+# subset matrix
+norm.counts <- norm.counts[, high_var_genes]
+```
+
+Choose a set of soft-thresholding powers
+```{r} 
+# Choose a set of soft-thresholding powers
+power <- c(c(1:10), seq(from = 12, to = 50, by = 2)) #calculate the networks by a variety of powers
+sft <- pickSoftThreshold(norm.counts, 
+                         powerVector = power,
+                         networkType = "signed",
+                         verbose = 5)
+
+sft.data <-sft$fitIndices
+#visualization to pick power (the beta or the soft thresholding power)
+
+a1 <- ggplot(sft.data, aes(Power, SFT.R.sq, label = Power)) +
+  geom_point() +
+  geom_text(nudge_y = 0.1) +
+  geom_hline(yintercept = 0.8, color = 'red') +
+  labs(x = 'Power', y = 'Scale free topology model fit, signed R^2') +
+  theme_classic()
+
+
+a2 <- ggplot(sft.data, aes(Power, mean.k., label = Power)) +
+  geom_point() +
+  geom_text(nudge_y = 0.1) +
+  labs(x = 'Power', y = 'Mean Connectivity') +
+  theme_classic()
+
+
+grid.arrange(a1, a2, ncol = 2)
+
+```
+High connectivity means all the genes are in one module. Want to be above the threshold but we also want to not go too high otherwise we lose mean connectivity and have too many gene networks. Remember that the dots are not all in order.  
+
+What power are you choosing and why?
+The sweet spot may be around 18-24, running with 18 
+
+Network construction
+```{r}
+# convert matrix to numeric
+norm.counts[] <- sapply(norm.counts, as.numeric)
+dim(norm.counts) # check dimensions: 
+soft_power <- 18
+temp_cor <- cor #base R way to calc correlation 
+cor <- WGCNA::cor #WCGNA based way - function is called cor
+
+# memory estimate w.r.t blocksize
+#bwnet <- blockwiseModules(norm.counts,
+#                          maxBlockSize = 8000, 
+#maxBlockSize should be larger than all the genes in our matrix. this was already filtered 50%. This will help it run all at once  
+#                          TOMType = "signed",
+#                          power = soft_power,
+#                          mergeCutHeight = 0.25,
+#                          numericLabels = FALSE,
+#                          randomSeed = 1234,
+#                          verbose = 3)
+
+# This step takes a while so you can save it here for future work.
+#save(bwnet, file = "AH_data/bwnet_results_WGCNA.RData")
+load("AH_data/bwnet_results_WGCNA.RData") #to load the bwnet file back in 
+
+cor <- temp_cor
+```
+Plot the dendrogram of modules
+```{r}
+module_eigengenes <- bwnet$MEs
+
+# Print out a preview
+head(module_eigengenes)
+
+# get number of genes for each module
+table(bwnet$colors)
+
+# Plot the dendrogram and the module colors before and after merging underneath
+plotDendroAndColors(bwnet$dendrograms[[1]], cbind(bwnet$unmergedColors, bwnet$colors),
+                    c("unmerged", "merged"),
+                    dendroLabels = FALSE,
+                    addGuide = TRUE,
+                    hang= 0.03,
+                    guideHang = 0.05)
+```
+Unmerged modules are the initial clusters of co-expressed genes identified from the dendrogram. Merged modules are the result of combining highly similar modules based on their eigengene expression profiles. This merging results in reduced redundancy and, ideally, improved biological meaningfulness.Grey is uncorrelated, the height shows how strong the correlation is. 
+
+Test for a correlation between each eigengene of each module and our ULT trait data
+```{r}
+# Define numbers of genes and samples
+nSamples <- nrow(norm.counts) #
+nGenes <- ncol(norm.counts) #
+
+
+# correlation between module eigengenes and trait (ULT)
+module.trait.corr <- cor(module_eigengenes, ULT_trait, use = 'p')
+module.trait.corr.pvals <- corPvalueStudent(module.trait.corr, nSamples)
+
+# merge eigengenes with trait data
+heatmap.data <- merge(module_eigengenes, ULT_trait, by = "row.names") %>%
+  column_to_rownames(var = "Row.names")
+
+# automatically detect eigengene and trait columns
+eigengene_cols <- grep("^ME", colnames(heatmap.data), value = TRUE)
+trait_cols <- colnames(ULT_trait)
+
+# plot correlations
+CorLevelPlot(heatmap.data,
+             x = trait_cols,
+             y = eigengene_cols,
+             col = c("blue1", "skyblue", "white", "pink", "red"))
+```
+
+
+
+
+need to extract TE reg genes into a vector I can use to make sure there is overlap btwn the WGCNA genes and the TE reg genes 
+```{r}
+#make sure the gene IDs match for list of TE reg genes and WGCNA
+#gene names for WGCNA
+wgcna_genes <- colnames(norm.counts)
+
+#checking intersection 
+TE_genes_present <- intersect(TE_genes, wgcna_genes)
+length(TE_genes_present)
+TE_genes_present
+
+```
+Map each gene to the WGCNA module
+```{r}
+module.gene.mapping <- as.data.frame(bwnet$colors)
+
+#renaming columns 
+colnames(module.gene.mapping)[1] <- "module"
+
+module.gene.mapping <- module.gene.mapping %>%
+  tibble::rownames_to_column("geneID")
+
+#identify which ones contain TE reg genes 
+TE_in_modules <- module.gene.mapping %>%
+  filter(geneID %in% TE_genes_present)
+
+TE_in_modules
+
+#TE reg genes per module 
+table(TE_in_modules$module)
+
+#which modules correlate with ULT? 
+module.trait.corr
+module.trait.corr.pvals
+
+#convert to data frame 
+module_corr_df <- data.frame(
+  module = rownames(module.trait.corr),
+  correlation = module.trait.corr[, "ULT"], 
+  pvalue = module.trait.corr.pvals[, "ULT"]
+)
+
+#join with TE modules -> correlation btwn ULT and TE reg modules 
+TE_module_corr <- module_corr_df %>%
+  filter(module %in% TE_in_modules$module)
+
+TE_module_corr
+
+```
+NO TE regulated genes fall into ULT correlated modules --> TE regulation is not co-expressed with the higher ULT phenotype 
+
+```{r}
+table(TE_in_modules$module)
+
+```
+TE reg genes distributed among many modules, do not form coherent cluster though. Most of these genes do not cluster with any coexpression module (low variance, noisy, uncorrelated expression = most likely) 
+
+Are these TE reg genes enriched in any of the modules? 
+```{r}
+
+# Vector of TE genes that are in WGCNA
+TE_genes_present <- intersect(TE_genes, module.gene.mapping$geneID)
+
+#testing for enrichment (fisher exact) 
+fisher_test_for_module <- function(module_name, module.gene.mapping, TE_genes_present) {
+  
+  # genes in this module
+  module_genes <- module.gene.mapping$geneID[module.gene.mapping$module == module_name]
+  
+  # counts for the contingency table
+  a <- sum(module_genes %in% TE_genes_present)                # TE in module
+  b <- length(module_genes) - a                               # non-TE in module
+  c <- sum(TE_genes_present %in% module.gene.mapping$geneID) - a   # TE not in module
+  d <- nrow(module.gene.mapping) - (a + b + c)                # non-TE not in module
+  
+  tab <- matrix(c(a, b, c, d), nrow = 2,
+                dimnames = list(
+                  TE = c("TE", "nonTE"),
+                  Module = c("InModule", "NotInModule")
+                ))
+  
+  result <- fisher.test(tab)
+  
+  data.frame(
+    module = module_name,
+    TE_in_module = a,
+    TE_not_in_module = c,
+    nonTE_in_module = b,
+    nonTE_not_in_module = d,
+    p_value = result$p.value,
+    odds_ratio = result$estimate
+  )
+}
+
+#run for all modules 
+all_modules <- unique(module.gene.mapping$module)
+
+fisher_results <- do.call(rbind,
+  lapply(all_modules, function(m)
+    fisher_test_for_module(m, module.gene.mapping, TE_genes_present)
+  )
+)
+
+#sort by significance 
+fisher_results <- fisher_results %>%
+  arrange(p_value)
+
+fisher_results
+
+```
+p<0.05, odds ratio (OR) >1 = enrichment, <1 = depletion 
+Sig enriched models = green, purple 
+
+TE regulation coordinated but not linked to thermal tolerance 
+not part of heat response 
+
+##If TE regulation is not correlated with thermal response modules then what biological functions is it correlated with? 
+```{r}
+
+#input results into Revigo for the specific modules of interest: 
+# Select only the columns REVIGO needs
+# Read GO terms file (tonsa_go) provided in 
+
+tonsa_go <- read.delim("Genes_GO_terms_output.tsv", header = TRUE) %>%
+  dplyr::slice(-c(1,2)) %>%  # remove header rows if present
+  na.omit()  # remove missing GO annotations
+
+
+# Choose which module to explore -- change the name here
+geneIDs_salmon_green <- module.gene.mapping %>% filter(bwnet$colors == 'green') %>% pull(geneID)
+
+# Filter annotation for module genes -- change the name here
+module_GO_green <- tonsa_go[tonsa_go$geneID %in% geneIDs_salmon_green, ]
+
+go_terms_green <- module_GO_green$GO
+
+# Split by semicolon and flatten
+go_split_green <- unlist(strsplit(go_terms_green, ";"))
+
+# Get unique GO categories
+unique_go_green <- unique(go_split_green)
+
+# print as a clean list (printed and input into REViGO, R code downloaded from results)
+#cat(unique_go_green, sep = "\n")
+
+# A treemap R script produced by the Revigo server at http://revigo.irb.hr/
+# If you found Revigo useful in your work, please cite the following reference:
+# Supek F et al. "REVIGO summarizes and visualizes long lists of Gene Ontology
+# terms" PLoS ONE 2011. doi:10.1371/journal.pone.0021800
+
+# author: Anton Kratz <anton.kratz@gmail.com>, RIKEN Omics Science Center, Functional Genomics Technology Team, Japan
+# created: Fri, Nov 02, 2012  7:25:52 PM
+# last change: Fri, Nov 09, 2012  3:20:01 PM
+
+# -----------------------------------------------------------------------------
+# If you don't have the treemap package installed, uncomment the following line:
+# install.packages( "treemap" );
+library(treemap) 								# treemap package by Martijn Tennekes
+
+# Set the working directory if necessary
+# setwd("C:/Users/username/workingdir");
+
+# --------------------------------------------------------------------------
+# Here is your data from Revigo. Scroll down for plot configuration options.
+
+revigo.names <- c("term_ID","description","frequency","uniqueness","dispensability","representative");
+revigo.data <- rbind(c("GO:0006099","tricarboxylic acid cycle",0.4795642310420823,0.960975088739773,0.00371795,"tricarboxylic acid cycle"),
+c("GO:0005975","carbohydrate metabolic process",5.225546423125785,0.9506861031903907,0.10180365,"tricarboxylic acid cycle"),
+c("GO:0006108","malate metabolic process",0.08696766550543224,0.9326981798237599,0.04478605,"malate metabolic process"),
+c("GO:0006937","regulation of muscle contraction",0.06087424293302902,0.9354042538095811,-0,"regulation of muscle contraction"),
+c("GO:0007274","neuromuscular synaptic transmission",0.026303509969896183,0.9302575758568221,0.12123065,"regulation of muscle contraction"),
+c("GO:0010628","positive regulation of gene expression",0.5826830749845074,0.8876060624373502,0.49235165,"regulation of muscle contraction"),
+c("GO:0010906","regulation of glucose metabolic process",0.05604791082846092,0.9310204862473965,0.13558268,"regulation of muscle contraction"),
+c("GO:0030322","stabilization of membrane potential",0.05485836191562913,0.920165512136605,0.12087161,"regulation of muscle contraction"),
+c("GO:0030336","negative regulation of cell migration",0.06363944732705804,0.9332626829563119,0.12848563,"regulation of muscle contraction"),
+c("GO:0045785","positive regulation of cell adhesion",0.15308273730024521,0.8999623739457033,0.38019086,"regulation of muscle contraction"),
+c("GO:0050794","regulation of cellular process",25.7716623670672,0.8894524089215377,0.37908325,"regulation of muscle contraction"),
+c("GO:0051282","regulation of sequestering of calcium ion",0.10087885804212855,0.9077007956330281,0.17503248,"regulation of muscle contraction"),
+c("GO:0051496","positive regulation of stress fiber assembly",0.018868119509976255,0.912230888366007,0.11871016,"regulation of muscle contraction"),
+c("GO:0065008","regulation of biological quality",3.3409205166696405,0.9128819938375649,0.16753754,"regulation of muscle contraction"),
+c("GO:0007017","microtubule-based process",1.5334704995844244,0.9964975593734784,-0,"microtubule-based process"),
+c("GO:0007629","flight behavior",0.00021860445414808484,0.8970559077883867,-0,"flight behavior"),
+c("GO:0060047","heart contraction",0.05491514229332993,0.853739660507717,0.27912495,"flight behavior"),
+c("GO:0009987","cellular process",87.14322191622645,1,-0,"cellular process"),
+c("GO:0016311","dephosphorylation",0.1708322833695157,0.9252345219846759,0.04736771,"dephosphorylation"),
+c("GO:0006011","UDP-alpha-D-glucose metabolic process",0.048828285803804036,0.8926479832255014,0.33341182,"dephosphorylation"),
+c("GO:0006172","ADP biosynthetic process",0.010586701422314394,0.8781130084216853,0.3560702,"dephosphorylation"),
+c("GO:0016310","phosphorylation",1.199317976815209,0.9139267455860314,0.43227723,"dephosphorylation"),
+c("GO:0031529","ruffle organization",0.0064985142278567035,0.9326173685285458,0.0025607,"ruffle organization"),
+c("GO:0000226","microtubule cytoskeleton organization",0.9352608303176327,0.8928457978677438,0.45887878,"ruffle organization"),
+c("GO:0007029","endoplasmic reticulum organization",0.1625139580363483,0.9185150707173306,0.32312283,"ruffle organization"),
+c("GO:0097435","supramolecular fiber organization",0.883326657853595,0.9201256497820365,0.25073927,"ruffle organization"),
+c("GO:0032501","multicellular organismal process",4.906531549051603,1,0,"multicellular organismal process"),
+c("GO:0032502","developmental process",5.219655458939327,1,-0,"developmental process"),
+c("GO:0032781","positive regulation of ATP-dependent activity",0.000181697208642564,0.9304006854561127,0.08740337,"positive regulation of ATP-dependent activity"),
+c("GO:0048863","stem cell differentiation",0.10150060317795231,0.9305747052471163,0.00319645,"stem cell differentiation"),
+c("GO:0030707","follicle cell of egg chamber development",0.008448920201879226,0.9208187138587944,0.42355865,"stem cell differentiation"),
+c("GO:0090131","mesenchyme migration",0.0007012376646048955,0.8703909984310902,0.42613461,"stem cell differentiation"),
+c("GO:0055088","lipid homeostasis",0.192116407950661,0.9663265793959005,-0,"lipid homeostasis"),
+c("GO:0036335","intestinal stem cell homeostasis",0.001544426273461794,0.8807927583816483,0.43667785,"lipid homeostasis"),
+c("GO:0070588","calcium ion transmembrane transport",0.48272973709890205,0.9853861723394425,0.00372052,"calcium ion transmembrane transport"),
+c("GO:0006810","transport",19.13209716394505,0.9885058720608756,0.37463881,"calcium ion transmembrane transport"),
+c("GO:0071353","cellular response to interleukin-4",0.006969791362773353,0.9680403153484239,-0,"cellular response to interleukin-4"),
+c("GO:0009583","detection of light stimulus",0.07009821529052418,0.9575260627867305,0.20124398,"cellular response to interleukin-4"),
+c("GO:0042060","wound healing",0.16336850272074535,0.9668785295603256,0.17218929,"cellular response to interleukin-4"),
+c("GO:0072528","pyrimidine-containing compound biosynthetic process",0.6643616483071101,0.9447803706219702,0.05358089,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0000470","maturation of LSU-rRNA",0.14137178439945494,0.8498447721805766,0.31174828,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0006412","translation",4.43254315109974,0.896528080987298,0.45318189,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0006457","protein folding",1.1355876808838297,0.9159028448075228,0.19083536,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0008610","lipid biosynthetic process",3.5969602738358635,0.9012899851486774,0.23214257,"pyrimidine-containing compound biosynthetic process"));
+
+stuff <- data.frame(revigo.data);
+names(stuff) <- revigo.names;
+
+stuff$frequency <- as.numeric( as.character(stuff$frequency) );
+stuff$uniqueness <- as.numeric( as.character(stuff$uniqueness) );
+stuff$dispensability <- as.numeric( as.character(stuff$dispensability) );
+
+# by default, outputs to a PDF file
+pdf( file="revigo_treemap_green.pdf", width=16, height=9 ) # width and height are in inches
+
+# check the tmPlot command documentation for all possible parameters - there are a lot more
+treemap(
+  stuff,
+  index = c("representative","description"),
+  vSize = "uniqueness",
+  type = "categorical",
+  vColor = "representative",
+  title = "Revigo TreeMap",
+  inflate.labels = FALSE,      # set this to TRUE for space-filling group labels - good for posters
+  lowerbound.cex.labels = 0,   # try to draw as many labels as possible (still, some small squares may not get a label)
+  bg.labels = "#CCCCCCAA",   # define background color of group labels
+								 # "#CCCCCC00" is fully transparent, "#CCCCCCAA" is semi-transparent grey, NA is opaque
+  position.legend = "none"
+)
+
+dev.off()
+
+
+```
+
+
+same thing for purple module: 
+```{r}
+# Choose which module to explore -- change the name here
+geneIDs_salmon_purple <- module.gene.mapping %>% filter(bwnet$colors == 'purple') %>% pull(geneID)
+
+# Filter annotation for module genes -- change the name here
+module_GO_purple <- tonsa_go[tonsa_go$geneID %in% geneIDs_salmon_purple, ]
+
+go_terms_purple <- module_GO_purple$GO
+
+# Split by semicolon and flatten
+go_split_purple <- unlist(strsplit(go_terms_purple, ";"))
+
+# Get unique GO categories
+unique_go_purple <- unique(go_split_purple)
+
+# print as a clean list (printed and input into REViGO, R code downloaded from results)
+#cat(unique_go_purple, sep = "\n")
+
+# A treemap R script produced by the Revigo server at http://revigo.irb.hr/
+# If you found Revigo useful in your work, please cite the following reference:
+# Supek F et al. "REVIGO summarizes and visualizes long lists of Gene Ontology
+# terms" PLoS ONE 2011. doi:10.1371/journal.pone.0021800
+
+# author: Anton Kratz <anton.kratz@gmail.com>, RIKEN Omics Science Center, Functional Genomics Technology Team, Japan
+# created: Fri, Nov 02, 2012  7:25:52 PM
+# last change: Fri, Nov 09, 2012  3:20:01 PM
+
+# -----------------------------------------------------------------------------
+# If you don't have the treemap package installed, uncomment the following line:
+# install.packages( "treemap" );
+library(treemap) 								# treemap package by Martijn Tennekes
+
+# Set the working directory if necessary
+# setwd("C:/Users/username/workingdir");
+
+# --------------------------------------------------------------------------
+# Here is your data from Revigo. Scroll down for plot configuration options.
+
+revigo.names <- c("term_ID","description","frequency","uniqueness","dispensability","representative");
+revigo.data <- rbind(c("GO:0006099","tricarboxylic acid cycle",0.4795642310420823,0.960975088739773,0.00371795,"tricarboxylic acid cycle"),
+c("GO:0005975","carbohydrate metabolic process",5.225546423125785,0.9506861031903907,0.10180365,"tricarboxylic acid cycle"),
+c("GO:0006108","malate metabolic process",0.08696766550543224,0.9326981798237599,0.04478605,"malate metabolic process"),
+c("GO:0006937","regulation of muscle contraction",0.06087424293302902,0.9354042538095811,-0,"regulation of muscle contraction"),
+c("GO:0007274","neuromuscular synaptic transmission",0.026303509969896183,0.9302575758568221,0.12123065,"regulation of muscle contraction"),
+c("GO:0010628","positive regulation of gene expression",0.5826830749845074,0.8876060624373502,0.49235165,"regulation of muscle contraction"),
+c("GO:0010906","regulation of glucose metabolic process",0.05604791082846092,0.9310204862473965,0.13558268,"regulation of muscle contraction"),
+c("GO:0030322","stabilization of membrane potential",0.05485836191562913,0.920165512136605,0.12087161,"regulation of muscle contraction"),
+c("GO:0030336","negative regulation of cell migration",0.06363944732705804,0.9332626829563119,0.12848563,"regulation of muscle contraction"),
+c("GO:0045785","positive regulation of cell adhesion",0.15308273730024521,0.8999623739457033,0.38019086,"regulation of muscle contraction"),
+c("GO:0050794","regulation of cellular process",25.7716623670672,0.8894524089215377,0.37908325,"regulation of muscle contraction"),
+c("GO:0051282","regulation of sequestering of calcium ion",0.10087885804212855,0.9077007956330281,0.17503248,"regulation of muscle contraction"),
+c("GO:0051496","positive regulation of stress fiber assembly",0.018868119509976255,0.912230888366007,0.11871016,"regulation of muscle contraction"),
+c("GO:0065008","regulation of biological quality",3.3409205166696405,0.9128819938375649,0.16753754,"regulation of muscle contraction"),
+c("GO:0007017","microtubule-based process",1.5334704995844244,0.9964975593734784,-0,"microtubule-based process"),
+c("GO:0007629","flight behavior",0.00021860445414808484,0.8970559077883867,-0,"flight behavior"),
+c("GO:0060047","heart contraction",0.05491514229332993,0.853739660507717,0.27912495,"flight behavior"),
+c("GO:0009987","cellular process",87.14322191622645,1,-0,"cellular process"),
+c("GO:0016311","dephosphorylation",0.1708322833695157,0.9252345219846759,0.04736771,"dephosphorylation"),
+c("GO:0006011","UDP-alpha-D-glucose metabolic process",0.048828285803804036,0.8926479832255014,0.33341182,"dephosphorylation"),
+c("GO:0006172","ADP biosynthetic process",0.010586701422314394,0.8781130084216853,0.3560702,"dephosphorylation"),
+c("GO:0016310","phosphorylation",1.199317976815209,0.9139267455860314,0.43227723,"dephosphorylation"),
+c("GO:0031529","ruffle organization",0.0064985142278567035,0.9326173685285458,0.0025607,"ruffle organization"),
+c("GO:0000226","microtubule cytoskeleton organization",0.9352608303176327,0.8928457978677438,0.45887878,"ruffle organization"),
+c("GO:0007029","endoplasmic reticulum organization",0.1625139580363483,0.9185150707173306,0.32312283,"ruffle organization"),
+c("GO:0097435","supramolecular fiber organization",0.883326657853595,0.9201256497820365,0.25073927,"ruffle organization"),
+c("GO:0032501","multicellular organismal process",4.906531549051603,1,0,"multicellular organismal process"),
+c("GO:0032502","developmental process",5.219655458939327,1,-0,"developmental process"),
+c("GO:0032781","positive regulation of ATP-dependent activity",0.000181697208642564,0.9304006854561127,0.08740337,"positive regulation of ATP-dependent activity"),
+c("GO:0048863","stem cell differentiation",0.10150060317795231,0.9305747052471163,0.00319645,"stem cell differentiation"),
+c("GO:0030707","follicle cell of egg chamber development",0.008448920201879226,0.9208187138587944,0.42355865,"stem cell differentiation"),
+c("GO:0090131","mesenchyme migration",0.0007012376646048955,0.8703909984310902,0.42613461,"stem cell differentiation"),
+c("GO:0055088","lipid homeostasis",0.192116407950661,0.9663265793959005,-0,"lipid homeostasis"),
+c("GO:0036335","intestinal stem cell homeostasis",0.001544426273461794,0.8807927583816483,0.43667785,"lipid homeostasis"),
+c("GO:0070588","calcium ion transmembrane transport",0.48272973709890205,0.9853861723394425,0.00372052,"calcium ion transmembrane transport"),
+c("GO:0006810","transport",19.13209716394505,0.9885058720608756,0.37463881,"calcium ion transmembrane transport"),
+c("GO:0071353","cellular response to interleukin-4",0.006969791362773353,0.9680403153484239,-0,"cellular response to interleukin-4"),
+c("GO:0009583","detection of light stimulus",0.07009821529052418,0.9575260627867305,0.20124398,"cellular response to interleukin-4"),
+c("GO:0042060","wound healing",0.16336850272074535,0.9668785295603256,0.17218929,"cellular response to interleukin-4"),
+c("GO:0072528","pyrimidine-containing compound biosynthetic process",0.6643616483071101,0.9447803706219702,0.05358089,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0000470","maturation of LSU-rRNA",0.14137178439945494,0.8498447721805766,0.31174828,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0006412","translation",4.43254315109974,0.896528080987298,0.45318189,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0006457","protein folding",1.1355876808838297,0.9159028448075228,0.19083536,"pyrimidine-containing compound biosynthetic process"),
+c("GO:0008610","lipid biosynthetic process",3.5969602738358635,0.9012899851486774,0.23214257,"pyrimidine-containing compound biosynthetic process"));
+
+stuff <- data.frame(revigo.data);
+names(stuff) <- revigo.names;
+
+stuff$frequency <- as.numeric( as.character(stuff$frequency) );
+stuff$uniqueness <- as.numeric( as.character(stuff$uniqueness) );
+stuff$dispensability <- as.numeric( as.character(stuff$dispensability) );
+
+# by default, outputs to a PDF file
+pdf( file="revigo_treemap_purple.pdf", width=16, height=9 ) # width and height are in inches
+
+# check the tmPlot command documentation for all possible parameters - there are a lot more
+treemap(
+  stuff,
+  index = c("representative","description"),
+  vSize = "uniqueness",
+  type = "categorical",
+  vColor = "representative",
+  title = "Revigo TreeMap",
+  inflate.labels = FALSE,      # set this to TRUE for space-filling group labels - good for posters
+  lowerbound.cex.labels = 0,   # try to draw as many labels as possible (still, some small squares may not get a label)
+  bg.labels = "#CCCCCCAA",   # define background color of group labels
+								 # "#CCCCCC00" is fully transparent, "#CCCCCCAA" is semi-transparent grey, NA is opaque
+  position.legend = "none"
+)
+
+dev.off()
+
+
+```
+
+
+
+
+
+
+
+
+

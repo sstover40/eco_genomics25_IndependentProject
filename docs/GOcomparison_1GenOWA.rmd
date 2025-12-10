@@ -1,0 +1,357 @@
+---
+title: "GOcomparison_3Gen_RBdata"
+output: html_document
+date: "2025-11-24"
+---
+
+This is comparing specific genes associated with GO terms(involved with TE regulation) during and after thermal stress
+
+1. Are these genes DE during or after environmental stress?
+2. Are all of them upregulated, downregulated, or a mix?/ do they have similar behaviors? (WGCNA)
+3. If these genes respond to environmental stress, is there a difference in regulation after 1, 3, or 23 generations of OWA?
+
+Notes on the samples:
+From Brennan's reciprocal transplant experiment. Focusing on Ambient in Ambient control (AAAA), Ambient in OWA (HHAA) for 3 generations
+sampleid:	    
+AAAA_F3_REP1	
+AAAA_F3_REP2	          
+AAAA_F3_REP3		          
+AAAA_F3_REP4	
+HHAA_F3_REP1	
+HHAA_F3_REP2	
+HHAA_F3_REP3	
+HHAA_F3_REP4	
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#to set our working dir
+knitr::opts_knit$set(root.dir = "/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/data/")
+```
+
+Steps: 
+1. Isolate gene list from the two TE regulator GO terms (GO:0006313; GO:0032197)
+2. Observe how their expression changes after 1 gen of OWA stress
+3. Expand to other TE regulator GO terms 
+4. determine if any are enriched after 1 gen of OWA stress 
+```{r}
+library(cluster)
+library(clusterProfiler)
+library(tidyverse)
+library(dplyr)
+
+```
+##Isolating the genes in the GO terms mentioned by Brennan et al. 2025 PNAS
+there were only 2 mentioned to be enriched that also had to do with TE regulating 
+transcriptome GO annotations were from the A. tonsa transcriptome provided in class 
+```{r}
+
+# Annotation file 
+#Read GO terms file (tonsa_go) provided in /gpfs1/cl/ecogen/pbio6800/Transcriptomics/enrichment and copied into data dir
+tonsa_go <- read.delim("Genes_GO_terms_output.tsv", header = TRUE) %>%
+  dplyr::slice(-c(1,2)) %>%  # remove header rows if present
+  separate_rows(GO, sep=";") %>% 
+  mutate(GO = trimws(GO)) %>%
+  na.omit()  # remove missing GO annotations
+
+#Gene-2-GO mapping for clusterProfiler: list where names = geneIDs values = Vector of GO IDs for that gene 
+gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
+
+#check
+#gene2go[1:3]
+
+go_id <- c("GO:0006313","GO:0032197")   # Recombination and recombination regulation
+
+#extracting genes that belong to the specific GO terms of interest
+genes_by_term <- lapply(go_id, function(go) {
+  # select genes where the GO term is in their vector of GO terms
+  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
+})
+names(genes_by_term) <- go_id
+genes_by_term
+
+#checking the raw data just in case. Should be the same # of genes in genes_for_terms
+tonsa_go %>% filter(GO %in% go_id) %>% pull(geneID)  
+
+#looks the same! the 2 go terms share all 7 genes it seems hence 0 in the second category
+```
+
+Converting the list of genes into a separate CSV data table for further analysis: 
+```{r}
+#convert to df of genes of interest
+genes_df <- do.call(
+  rbind,
+  lapply(names(genes_by_term), function(go) {
+    genes <- genes_by_term[[go]]
+    
+    if (length(genes) == 0) {
+      # return a properly shaped empty data frame
+      return(data.frame(
+        GeneID = character(0),
+        GO = character(0),
+        stringsAsFactors = FALSE
+      ))
+    }
+    
+    # normal case, no GO terms with 0 genes 
+    data.frame(
+      GeneID = genes,
+      GO = go,
+      stringsAsFactors = FALSE
+    )
+  })
+)
+
+#save as table 
+#write.csv(genes_df,"genes_by_GOterms.csv", row.names = FALSE)
+genes_df
+```
+7 genes total, all found in category GO:0006313
+
+Uploading Expression Matrices and Metadata  
+```{r} 
+## Import the libraries that we're likely to need in this session
+
+library(DESeq2)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(ggpubr)
+library(vsn)  
+library("pheatmap")
+library("vsn")
+
+####################################################
+### Import our data
+####################################################
+ 
+# Import the counts matrix from 1 gen stress (Normalized 3 Gen in OWA conditions)
+counts_F1 <- read.table("recip_trans_GE/DGE_counts_F1.txt", header=TRUE, row.names=1)
+head(counts_F1)
+dim(counts_F1)
+
+counts_F1_round <- round(counts_F1) # bc DESeq2 doesn't like decimals (and Salmon outputs data with decimals)
+head(counts_F1_round)
+colnames(counts_F1_round) <- sub("^(.*?R[0-9]).*", "\\1", colnames(counts_F1_round))
+ #changing column names to match metadata table 
+
+
+#import the sample description table:
+metadata_F1 <- read.delim("recip_trans_GE/transplant_exp_metadata_fixed.txt", header=TRUE, stringsAsFactors = TRUE, row.names=1)
+head(metadata_F1)
+```
+
+Make DESeq Object: 
+```{r}
+ ####################################################
+
+### Start working with DESeq2!
+
+####################################################
+
+#### Create a DESeq object and define the experimental design here with the tilda
+
+dds <- DESeqDataSetFromMatrix(countData = counts_F1_round, colData=metadata_F1, 
+                              design= ~ treatment)
+
+dim(dds)
+
+# Filter out genes with too few reads - remove all genes with counts < 15 in more than 75% of 24 samples, so 18)
+## suggested by WGCNA on RNAseq FAQ
+
+dds <- dds[rowSums(counts(dds) >= 15) >= 12,]
+nrow(dds) 
+# How many transcripts have at least 15 reads (a.k.a counts) in 75% of the samples
+
+# Run the DESeq model to test for differential gene expression
+
+dds$treatment <- relevel(dds$treatment, ref = "AAAA")
+
+dds$group <- factor(paste0(dds$treatment))
+design(dds) <- ~ group
+#need to get rid of 0s in the data 
+dds <- DESeq(dds)
+
+# List the results you've generated
+resultsNames(dds)
+# Copy the results names 
+
+# transform the data using variance stabilization
+vsd <- vst(dds, blind=FALSE)
+
+###COMPARISONS 
+
+#Ambient vs. 1Gen OWA
+res_Av1OWA <- results(dds, contrast=c("group", "AAAA", "HHAA"), alpha = 0.05)
+res_Av1OWA <- res_Av1OWA[order(res_Av1OWA$padj),] #sort
+res_Av1OWA <- res_Av1OWA[!is.na(res_Av1OWA$padj),]
+
+```
+Plotting the Genes of interest (GO:0006313)
+```{r}
+# load library
+library(purrr)
+
+#Gene names 
+gene_list <- genes_df$GeneID
+#need to get rid of _iX suffix (isoforms)
+gene_list_fixed <- sub("_i[0-9]+$", "", gene_list)
+
+#Keep only genes that exist in dds
+gene_list_existing <- gene_list_fixed[gene_list_fixed %in% rownames(dds)]
+gene_list_existing
+
+#looping over list of genes with map_df: count & line for each gene of interest 
+d_all <- map_df(gene_list_existing, function(g) {
+  d <- plotCounts(dds, gene = g, intgroup = "treatment", returnData = TRUE)
+  d$gene <- g
+  d
+})
+
+#ordering it by treatment 
+d_all$treatment <- factor(d_all$treatment, levels = sort(unique(d_all$treatment)))
+
+#Visualize: 
+#Summarize: mean and SD per gene per treatment
+d_summary <- d_all %>%
+  group_by(gene, treatment) %>%
+  summarise(
+    mean_count = mean(count),
+    sd_count = sd(count),
+    .groups = 'drop'
+  )
+
+#ggplot with facets for each gene: Gene Expression for each treatment  
+GE_byTreatmentOWA <-ggplot(d_all, aes(x = treatment, y = count, fill = treatment)) +
+  geom_boxplot(alpha = 0.3, outlier.shape = NA) +       # boxplot without outliers
+  geom_jitter(width = 0.2, size = 2, alpha = 0.8) +    # individual sample points
+  facet_wrap(~ gene, scales = "free_y") +
+  scale_y_log10() +                                    
+  theme_bw() +
+  theme(strip.text = element_text(size = 10),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(y = "Normalized counts (log10)", x = "Treatment")
+
+GE_byTreatmentOWA
+
+ggsave("GE_byTreatment1GenOWA.png", GE_byTreatmentOWA, width=8, heigh=6, dpi=300)
+
+```
+Only 2 genes are in the DESeq object. Same genes that were found in the one gen of heat stress 
+DN134741 in HHAA resembles HHHH and AAHH
+DN1171175 in HHAA = lower than AAAA
+
+--> checking to see if TE regulators are enriched and what genes are involved
+
+##Expanding to other TE regulator GO terms 
+
+What TE regulators are in the transcriptome annotation?
+```{r}
+#loading libraries 
+library(topGO)
+library(GO.db)
+
+#vector of genes involved in aspects of TE regulation:
+TE_GO_terms <- c(
+  # Core transposition processes
+  "GO:0006313", "GO:0032197", "GO:0090491",
+
+  # Transposase & nuclease activity
+  "GO:0004803", "GO:0004519", "GO:0004520",
+
+  # Reverse transcriptase & retrotransposon functions
+  "GO:0003964", "GO:0004175", "GO:0004190",
+
+  # DNA binding / recombination-related (found in many TEs)
+  "GO:0003697", "GO:0004386", "GO:0005524"
+)
+
+#how many are present in the annotated genome?
+present_terms <- TE_GO_terms[TE_GO_terms %in% tonsa_go$GO]
+present_terms
+
+#genes in annotated genome involved in TE regulation
+TE_genes <- tonsa_go %>%
+  filter(GO %in% TE_GO_terms) %>%
+  pull(geneID) %>%
+  unique()
+
+```
+Are these genes enriched after 1 generation of OWA stress?
+```{r}
+#results from DESeq object (3 Generations OWA)
+#convert to a df
+res_df1 <- as.data.frame(res_Av1OWA)
+res_df1$gene <- rownames(res_df1)
+
+# Select significant DE genes
+sig_genes1 <- res_df1 %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  pull(gene)
+
+#check 
+length(sig_genes1)
+
+#make sure there is only one GO term per row in tonsa_go 
+term2gene <- tonsa_go %>%
+  tidyr::separate_rows(GO, sep=";") %>%
+  dplyr::mutate(
+    GO = trimws(GO), 
+    geneID = sub("_i[0-9]+$", "", geneID)# remove isoform suffix
+    )%>%  
+  dplyr::select(GO, geneID)
+
+#test TE GO term enrichment: are TE genes among the DE genes? 
+Enrichment_TE1 <- enricher(
+  gene = sig_genes1,
+  TERM2GENE = term2gene %>% filter(GO %in% TE_GO_terms),
+  pAdjustMethod = "BH"
+)
+
+#view results 
+Enrichment_TE1@result
+
+```
+1 gene out of 89 the could be mapped to the list of GO terms is in the list of DEGs but it is not significantly enriched 
+GO term (GO:0003697) gene is enriched but not significantly, this indicated single stranded DNA binding
+ 
+
+GSEA (Gene Set Enrichment Analysis)
+```{r}
+
+# Create ranked list by log2FoldChange
+geneList1 <- res_df1$log2FoldChange
+names(geneList1) <- res_df1$gene
+
+# Sort decreasing: most upregulated at top
+geneList1 <- sort(geneList1, decreasing = TRUE)
+
+# Ensure one GO term per row
+term2gene <- tonsa_go %>%
+  tidyr::separate_rows(GO, sep=";") %>%
+  dplyr::mutate(
+    GO = trimws(GO), 
+    geneID = sub("_i[0-9]+$", "", geneID)# remove isoform suffix
+    )%>%  
+  dplyr::select(GO, geneID)
+
+# Perform GSEA using clusterProfiler
+gsea_res1 <- GSEA(geneList1,
+                 TERM2GENE = term2gene,
+                 pAdjustMethod = "BH",
+                 verbose = FALSE)
+
+
+gsea_TE1 <- gsea_res1@result %>%
+  filter(ID %in% TE_GO_terms) %>%
+  arrange(p.adjust)
+
+gsea_TE1
+```
+TE reg GO terms have no significant coordinated regulation trend 
+
+
+
+
+
+
+

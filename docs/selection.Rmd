@@ -1,0 +1,354 @@
+---
+title: "Copepod_Selection"
+output: html_document
+date: "2025-12-08"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir="/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/results/ANGSD/PCA_ADMIX/")
+```
+
+Load libraries
+
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(qqman)
+```
+
+Remaking the PCA, but just for the red spruce samples (we've removed black spruce)
+
+```{r}
+LAT1_cov <- as.matrix(read.table("LAT1_K2.cov"))
+LAT1_PCA <- eigen(LAT1_cov)
+LAT1_var <- round(LAT1_PCA$values/sum(LAT1_PCA$values),3)
+LAT1_var[1:3]
+
+SEA1_cov <- as.matrix(read.table("SEA1_K3.cov"))
+SEA1_PCA <- eigen(SEA1_cov)
+SEA1_var <- round(SEA1_PCA$values/sum(SEA1_PCA$values),3)
+SEA1_var[1:3]
+
+SEA2_cov <- as.matrix(read.table("SEA2_K3.cov"))
+SEA2_PCA <- eigen(SEA2_cov)
+SEA2_var <- round(SEA2_PCA$values/sum(SEA2_PCA$values),3)
+SEA2_var[1:3]
+
+# A "screeplot" of the eigenvalues of the PCA:
+barplot(LAT1_var, 
+        xlab="Eigenvalues of the PCA", 
+        ylab="Proportion of variance explained",
+        main="LAT1")
+
+barplot(SEA1_var, 
+        xlab="Eigenvalues of the PCA", 
+        ylab="Proportion of variance explained",
+        main="SEA1")
+
+barplot(SEA2_var, 
+        xlab="Eigenvalues of the PCA", 
+        ylab="Proportion of variance explained",
+        main="SEA2")
+```
+Prepare the sample ID info for plotting later:
+```{r}
+LAT1_names <- read.table("LAT1_bam.list")
+LAT1_names <- unlist(strsplit(basename(as.character(LAT1_names[,1])), split = ".sorted.rmdup.bam"))
+split = strsplit(LAT1_names, "_")
+LAT1_pops <- data.frame(LAT1_names[1:40], do.call(rbind, split[1:40]))
+# Names only goes from 1-95, because we took out the black spruce samples. Would be 1-113 if we had black spruce as well
+names(LAT1_pops) = c("Ind", "Pop", "Row", "Col")
+
+SEA1_names <- read.table("SEA1_bam.list")
+SEA1_names <- unlist(strsplit(basename(as.character(SEA1_names[,1])), split = ".sorted.rmdup.bam"))
+split = strsplit(SEA1_names, "_")
+SEA1_pops <- data.frame(SEA1_names[1:57], do.call(rbind, split[1:57]))
+# Names only goes from 1-95, because we took out the black spruce samples. Would be 1-113 if we had black spruce as well
+names(SEA1_pops) = c("Ind", "Pop", "Row", "Col")
+
+SEA2_names <- read.table("SEA2_bam.list")
+SEA2_names <- unlist(strsplit(basename(as.character(SEA2_names[,1])), split = ".sorted.rmdup.bam"))
+split = strsplit(SEA2_names, "_")
+SEA2_pops <- data.frame(SEA2_names[1:53], do.call(rbind, split[1:53]))
+# Names only goes from 1-95, because we took out the black spruce samples. Would be 1-113 if we had black spruce as well
+names(SEA2_pops) = c("Ind", "Pop", "Row", "Col")
+```
+
+
+Making the actual PCA, just red spruce and not black spruce
+```{r}
+LAT1_data = as.data.frame(LAT1_PCA$vectors)
+LAT1_data = LAT1_data[,c(1:3)]
+LAT1_data = cbind(LAT1_data, LAT1_pops)
+
+SEA1_data = as.data.frame(SEA1_PCA$vectors)
+SEA1_data = SEA1_data[,c(1:3)]
+SEA1_data = cbind(SEA1_data, SEA1_pops)
+
+SEA2_data = as.data.frame(SEA2_PCA$vectors)
+SEA2_data = SEA2_data[,c(1:3)]
+SEA2_data = cbind(SEA2_data, SEA2_pops)
+
+LAT1_scatter <- ggscatter(LAT1_data, x = "V1", y = "V2",
+          color = "Pop",
+          mean.point = TRUE,
+          star.plot = TRUE,
+          main="LAT1 PCA") +
+  theme_bw(base_size = 13, base_family = "Times")
+
+SEA1_scatter <- ggscatter(SEA1_data, x = "V1", y = "V2",
+          color = "Row",
+          mean.point = TRUE,
+          star.plot = TRUE,
+          main="SEA1 PCA") +
+  theme_bw(base_size = 13, base_family = "Times")
+
+SEA2_scatter <- ggscatter(SEA2_data, x = "V1", y = "V2",
+          color = "Row",
+          mean.point = TRUE,
+          star.plot = TRUE,
+          main="SEA2 PCA") +
+  theme_bw(base_size = 13, base_family = "Times")
+
+LAT1_scatter
+SEA1_scatter
+SEA2_scatter
+```
+
+```{r}
+LAT1_s <- read.table("LAT1_K2.selection")
+SEA1_s <- read.table("SEA1_K3.selection")
+SEA2_s <- read.table("SEA2_K3.selection")
+
+
+# convert test statistic to p-value
+LAT1_pval_PC1 <- as.data.frame(1-pchisq(LAT1_s[,1],1))
+names(LAT1_pval_PC1) = "p_PC1"
+
+SEA1_pval_PC1 <- as.data.frame(1-pchisq(SEA1_s[,1],1))
+names(SEA1_pval_PC1) = "p_PC1"
+
+SEA1_pval_PC2 <- as.data.frame(1-pchisq(SEA1_s[,2],1))
+names(SEA1_pval_PC2) = "p_PC2"
+
+SEA2_pval_PC1 <- as.data.frame(1-pchisq(SEA2_s[,1],1))
+names(SEA2_pval_PC1) = "p_PC1"
+
+SEA2_pval_PC2 <- as.data.frame(1-pchisq(SEA2_s[,2],1))
+names(SEA2_pval_PC2) = "p_PC2"
+
+
+# read positions
+#LAT1_pos <- read.table("LAT1_mafs.sites",sep="\t",header=T, stringsAsFactors=T)
+#dim(p)
+
+#SEA1_pos <- read.table("allRS_poly_mafs.sites",sep="\t",header=T, stringsAsFactors=T)
+#dim(p)
+```
+
+```{r}
+LAT1_PCAngsd_sites <- read.table("LAT1_K2.sites")
+LAT1_MAF_all_sites <- read.table("/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/data/ANGSD/LAT1.mafs.gz", header=T)
+LAT1_pos_filtered <- cbind(LAT1_MAF_all_sites,LAT1_PCAngsd_sites)[which(LAT1_PCAngsd_sites==1),]
+dim(LAT1_pos_filtered)
+
+SEA1_PCAngsd_sites <- read.table("SEA1_K3.sites")
+SEA1_MAF_all_sites <- read.table("/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/data/ANGSD/SEA1.mafs.gz", header=T)
+SEA1_pos_filtered <- cbind(SEA1_MAF_all_sites,SEA1_PCAngsd_sites)[which(SEA1_PCAngsd_sites==1),]
+dim(SEA1_pos_filtered)
+
+SEA2_PCAngsd_sites <- read.table("SEA2_K3.sites")
+SEA2_MAF_all_sites <- read.table("/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/data/ANGSD/SEA2.mafs.gz", header=T)
+SEA2_pos_filtered <- cbind(SEA2_MAF_all_sites,SEA2_PCAngsd_sites)[which(SEA2_PCAngsd_sites==1),]
+dim(SEA2_pos_filtered)
+```
+
+Making a manhattan plot:
+```{r}
+LAT1_mahattan_PC1 <- plot(-log10(LAT1_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", main="Selection outliers: LAT1 PC1")
+
+SEA1_manhattan_PC1 <- plot(-log10(SEA1_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", main="Selection outliers: SEA1 PC1")
+SEA1_manhattan_PC2 <- plot(-log10(SEA1_pval_PC2$p_PC2), col="darkred", cex=0.8, xlab="Locus position", main="Selection outliers: SEA1 PC2")
+
+SEA2_manhattan_PC1 <- plot(-log10(SEA2_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", ylab="-log10 P-Value", main="Selection outliers: SEA2 PC1")
+
+
+SEA2_manhattan_PC2 <- plot(-log10(SEA2_pval_PC2$p_PC2), col="darkred", cex=0.8, xlab="Locus position", main="Selection outliers: SEA2 PC2")
+```
+
+```{r}
+library(qqman)
+
+manhattan(SEA2_pos_filtered, )
+
+
+
+
+```
+
+
+
+
+```{r}
+LAT1_outliers_PC1 <- plot(-log10(LAT1_pval_PC1$p_PC1[2e05:2.01e05]),
+  col=as.factor(LAT1_pos_filtered$chromo), 
+  xlab="Position", 
+  ylab="-log10(p-value)", 
+  main="Selection outliers: LAT1 PC1")
+
+SEA1_outliers_PC1 <- plot(-log10(SEA1_pval_PC1$p_PC1[2e05:2.01e05]),
+  col=as.factor(SEA1_pos_filtered$chromo), 
+  xlab="Position", 
+  ylab="-log10(p-value)", 
+  main="Selection outliers: SEA1 PC1")
+
+SEA1_outliers_PC2 <- plot(-log10(SEA1_pval_PC2$p_PC2[2e05:2.01e05]),
+  col=as.factor(SEA1_pos_filtered$chromo), 
+  xlab="Position", 
+  ylab="-log10(p-value)", 
+  main="Selection outliers: SEA1 PC2")
+
+SEA2_outliers_PC1 <- plot(-log10(SEA2_pval_PC1$p_PC1[1e01:1.01e06]),
+  col=as.factor(SEA2_pos_filtered$chromo), 
+  xlab="Position", 
+  ylab="-log10(p-value)", 
+  main="Selection outliers: SEA2 PC1")
+
+SEA2_outliers_PC2 <- plot(-log10(SEA2_pval_PC2$p_PC2[2e05:2.01e05]),
+  col=as.factor(SEA2_pos_filtered$chromo), 
+  xlab="Position", 
+  ylab="-log10(p-value)", 
+  main="Selection outliers: SEA2 PC2")
+
+# Combine the locus info with the PC outlier p-values:
+
+LAT1_loci_pvals = cbind(LAT1_pos_filtered, LAT1_pval_PC1)
+SEA1_loci_pvals = cbind(SEA1_pos_filtered, SEA1_pval_PC1, SEA1_pval_PC2)
+SEA2_loci_pvals = cbind(SEA2_pos_filtered, SEA2_pval_PC1, SEA2_pval_PC2)
+
+# get the contig with the lowest p-value for selection
+LAT1_loci_pvals %>%
+  filter(p_PC1==min(p_PC1)) %>%
+  select(chromo,position)
+
+SEA1_loci_pvals %>%
+  filter(p_PC1==min(p_PC1)) %>%
+  select(chromo,position)
+
+SEA2_loci_pvals %>%
+  filter(p_PC1==min(p_PC1)) %>%
+  select(chromo,position)
+
+# get all the outliers with p-values below some cutoff
+cutoff=1e-3   # equals p<0.001 or p<0.0001
+
+LAT1_outliers_PC1 <- LAT1_loci_pvals %>%
+                    filter(p_PC1<cutoff) %>%
+                    select(chromo,position)
+
+SEA1_outliers_PC1 <- SEA1_loci_pvals %>%
+                    filter(p_PC1<cutoff) %>%
+                    select(chromo,position)
+
+SEA2_outliers_PC1 <- SEA2_loci_pvals %>%
+                    filter(p_PC1<cutoff) %>%
+                    select(chromo,position)
+
+# how many outlier loci < the cutoff?
+dim(SEA2_outliers_PC1)[1]
+```
+
+
+```{r}
+
+#loading libraries 
+library(topGO)
+library(GO.db)
+
+tonsa_go <- read.delim("/gpfs1/cl/ecogen/pbio6800/Transcriptomics/enrichment/Genes_GO_terms_output.tsv", header = TRUE) %>%
+  dplyr::slice(-c(1,2)) %>%  # remove header rows if present
+  separate_rows(GO, sep=";") %>% 
+  mutate(GO = trimws(GO)) %>%
+  na.omit()  # remove missing GO annotations
+
+#Gene-2-GO mapping for clusterProfiler: list where names = geneIDs values = Vector of GO IDs for that gene 
+gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
+
+#check
+#gene2go[1:3]
+
+go_id <- c("GO:0006313","GO:0032197")   # Recombination and recombination regulation
+
+#extracting genes that belong to the specific GO terms of interest
+genes_by_term <- lapply(go_id, function(go) {
+  # select genes where the GO term is in their vector of GO terms
+  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
+})
+names(genes_by_term) <- go_id
+genes_by_term
+
+#checking the raw data just in case. Should be the same # of genes in genes_for_terms
+tonsa_go %>% filter(GO %in% go_id) %>% pull(geneID)  
+
+#vector of genes involved in aspects of TE regulation:
+TE_GO_terms <- c(
+  # Core transposition processes
+  "GO:0006313", "GO:0032197", "GO:0090491",
+
+  # Transposase & nuclease activity
+  "GO:0004803", "GO:0004519", "GO:0004520",
+
+  # Reverse transcriptase & retrotransposon functions
+  "GO:0003964", "GO:0004175", "GO:0004190",
+
+  # DNA binding / recombination-related (found in many TEs)
+  "GO:0003697", "GO:0004386", "GO:0005524"
+)
+
+#how many are present in the annotated genome?
+present_terms <- TE_GO_terms[TE_GO_terms %in% tonsa_go$GO]
+present_terms
+
+#genes in annotated genome involved in TE regulation
+TE_genes <- tonsa_go %>%
+  filter(GO %in% TE_GO_terms) %>%
+  pull(geneID) %>%
+  unique()
+
+#Gene-2-GO mapping for clusterProfiler: list where names = geneIDs values = Vector of GO IDs for that gene 
+gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
+
+#check
+#gene2go[1:3]
+
+go_id <- c("GO:0006313","GO:0032197")   # Recombination and recombination regulation
+
+#extracting genes that belong to the specific GO terms of interest
+genes_by_term <- lapply(go_id, function(go) {
+  # select genes where the GO term is in their vector of GO terms
+  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
+})
+names(genes_by_term) <- go_id
+genes_by_term
+
+#checking the raw data just in case. Should be the same # of genes in genes_for_terms
+tonsa_go %>% filter(GO %in% go_id) %>% pull(geneID)  
+```
+
+
+```{r}
+TE_loc <- read.table("/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/results/mapping/trinity_to_genome.bed")
+
+TE_loc_filter <- TE_loc |> filter(
+  V4==TE_genes
+)
+
+filtered_vector <- TE_loc |> filter(V4==(TE_loc$V4 %in% TE_genes))
+
+
+
+
+```
+
