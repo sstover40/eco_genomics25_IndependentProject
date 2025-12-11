@@ -13,9 +13,12 @@ Load libraries
 
 ```{r}
 library(tidyverse)
+library(dplyr)
 library(ggplot2)
 library(ggpubr)
 library(qqman)
+library(topGO)
+library(GO.db)
 ```
 
 Remaking the PCA, but just for the red spruce samples (we've removed black spruce)
@@ -77,7 +80,6 @@ names(SEA2_pops) = c("Ind", "Pop", "Row", "Col")
 ```
 
 
-Making the actual PCA, just red spruce and not black spruce
 ```{r}
 LAT1_data = as.data.frame(LAT1_PCA$vectors)
 LAT1_data = LAT1_data[,c(1:3)]
@@ -167,29 +169,16 @@ dim(SEA2_pos_filtered)
 
 Making a manhattan plot:
 ```{r}
-LAT1_mahattan_PC1 <- plot(-log10(LAT1_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", main="Selection outliers: LAT1 PC1")
+#LAT1_mahattan_PC1 <- plot(-log10(LAT1_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", main="Selection outliers: LAT1 PC1")
 
-SEA1_manhattan_PC1 <- plot(-log10(SEA1_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", main="Selection outliers: SEA1 PC1")
-SEA1_manhattan_PC2 <- plot(-log10(SEA1_pval_PC2$p_PC2), col="darkred", cex=0.8, xlab="Locus position", main="Selection outliers: SEA1 PC2")
+#SEA1_manhattan_PC1 <- plot(-log10(SEA1_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", main="Selection outliers: SEA1 PC1")
+#SEA1_manhattan_PC2 <- plot(-log10(SEA1_pval_PC2$p_PC2), col="darkred", cex=0.8, xlab="Locus position", main="Selection outliers: SEA1 PC2")
 
 SEA2_manhattan_PC1 <- plot(-log10(SEA2_pval_PC1$p_PC1), col="black", cex=0.8, xlab="Locus position", ylab="-log10 P-Value", main="Selection outliers: SEA2 PC1")
 
 
 SEA2_manhattan_PC2 <- plot(-log10(SEA2_pval_PC2$p_PC2), col="darkred", cex=0.8, xlab="Locus position", main="Selection outliers: SEA2 PC2")
 ```
-
-```{r}
-library(qqman)
-
-manhattan(SEA2_pos_filtered, )
-
-
-
-
-```
-
-
-
 
 ```{r}
 LAT1_outliers_PC1 <- plot(-log10(LAT1_pval_PC1$p_PC1[2e05:2.01e05]),
@@ -222,39 +211,43 @@ SEA2_outliers_PC2 <- plot(-log10(SEA2_pval_PC2$p_PC2[2e05:2.01e05]),
   ylab="-log10(p-value)", 
   main="Selection outliers: SEA2 PC2")
 
+```
+
+
+```{r}
 # Combine the locus info with the PC outlier p-values:
 
 LAT1_loci_pvals = cbind(LAT1_pos_filtered, LAT1_pval_PC1)
 SEA1_loci_pvals = cbind(SEA1_pos_filtered, SEA1_pval_PC1, SEA1_pval_PC2)
 SEA2_loci_pvals = cbind(SEA2_pos_filtered, SEA2_pval_PC1, SEA2_pval_PC2)
 
+dim(SEA2_loci_pvals)
 # get the contig with the lowest p-value for selection
-LAT1_loci_pvals %>%
-  filter(p_PC1==min(p_PC1)) %>%
-  select(chromo,position)
+#LAT1_loci_pvals %>%
+#  filter(p_PC1==min(p_PC1)) %>%
+#  select(chromo,position)
 
-SEA1_loci_pvals %>%
-  filter(p_PC1==min(p_PC1)) %>%
-  select(chromo,position)
+#SEA1_loci_pvals %>%
+#  filter(p_PC1==min(p_PC1)) %>%
+#  select(chromo,position)
 
-SEA2_loci_pvals %>%
-  filter(p_PC1==min(p_PC1)) %>%
-  select(chromo,position)
+#SEA2_loci_pvals %>%
+#  filter(p_PC1==min(p_PC1)) %>%
+#  select(chromo,position)
 
 # get all the outliers with p-values below some cutoff
-cutoff=1e-3   # equals p<0.001 or p<0.0001
+cutoff=1e-4   # p<0.0001
 
-LAT1_outliers_PC1 <- LAT1_loci_pvals %>%
-                    filter(p_PC1<cutoff) %>%
-                    select(chromo,position)
+#LAT1_outliers_PC1 <- LAT1_loci_pvals %>%
+#                    dplyr::filter(p_PC1<cutoff) %>%
+#                    dplyr::select(chromo,position)
 
-SEA1_outliers_PC1 <- SEA1_loci_pvals %>%
-                    filter(p_PC1<cutoff) %>%
-                    select(chromo,position)
+#SEA1_outliers_PC1 <- SEA1_loci_pvals %>%
+#                    filter(p_PC1<cutoff) %>%
+#                    select(chromo,position)
 
 SEA2_outliers_PC1 <- SEA2_loci_pvals %>%
-                    filter(p_PC1<cutoff) %>%
-                    select(chromo,position)
+                    dplyr::filter(p_PC1<cutoff)
 
 # how many outlier loci < the cutoff?
 dim(SEA2_outliers_PC1)[1]
@@ -262,37 +255,8 @@ dim(SEA2_outliers_PC1)[1]
 
 
 ```{r}
+TE_loc <- read.table("/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/results/mapping/trinity_to_genome.bed")
 
-#loading libraries 
-library(topGO)
-library(GO.db)
-
-tonsa_go <- read.delim("/gpfs1/cl/ecogen/pbio6800/Transcriptomics/enrichment/Genes_GO_terms_output.tsv", header = TRUE) %>%
-  dplyr::slice(-c(1,2)) %>%  # remove header rows if present
-  separate_rows(GO, sep=";") %>% 
-  mutate(GO = trimws(GO)) %>%
-  na.omit()  # remove missing GO annotations
-
-#Gene-2-GO mapping for clusterProfiler: list where names = geneIDs values = Vector of GO IDs for that gene 
-gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
-
-#check
-#gene2go[1:3]
-
-go_id <- c("GO:0006313","GO:0032197")   # Recombination and recombination regulation
-
-#extracting genes that belong to the specific GO terms of interest
-genes_by_term <- lapply(go_id, function(go) {
-  # select genes where the GO term is in their vector of GO terms
-  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
-})
-names(genes_by_term) <- go_id
-genes_by_term
-
-#checking the raw data just in case. Should be the same # of genes in genes_for_terms
-tonsa_go %>% filter(GO %in% go_id) %>% pull(geneID)  
-
-#vector of genes involved in aspects of TE regulation:
 TE_GO_terms <- c(
   # Core transposition processes
   "GO:0006313", "GO:0032197", "GO:0090491",
@@ -305,50 +269,178 @@ TE_GO_terms <- c(
 
   # DNA binding / recombination-related (found in many TEs)
   "GO:0003697", "GO:0004386", "GO:0005524"
-)
+  )
 
-#how many are present in the annotated genome?
+tonsa_go <- read.delim("/gpfs1/cl/ecogen/pbio6800/Transcriptomics/enrichment/Genes_GO_terms_output.tsv", header = TRUE) %>%
+  dplyr::slice(-c(1,2)) %>%  # remove header rows if present
+  separate_rows(GO, sep=";") %>% 
+  mutate(GO = trimws(GO)) %>%
+  na.omit()  # remove missing GO annotations
+
+gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
+
+genes_by_term <- lapply(TE_GO_terms, function(go) {
+  # select genes where the GO term is in their vector of GO terms
+  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
+})
+
+names(genes_by_term) <- TE_GO_terms
+
 present_terms <- TE_GO_terms[TE_GO_terms %in% tonsa_go$GO]
-present_terms
 
-#genes in annotated genome involved in TE regulation
 TE_genes <- tonsa_go %>%
   filter(GO %in% TE_GO_terms) %>%
   pull(geneID) %>%
   unique()
 
-#Gene-2-GO mapping for clusterProfiler: list where names = geneIDs values = Vector of GO IDs for that gene 
-gene2go <- split(tonsa_go$GO, tonsa_go$geneID)
+TE_loc_filtered <- TE_loc |> dplyr::filter(TE_loc$V4 %in% TE_genes)
 
-#check
-#gene2go[1:3]
+SEA1_TE_selection_snps <- data.frame()
+SEA1_TE_selection_genes <- data.frame()
+num_nonsig <- 0
 
-go_id <- c("GO:0006313","GO:0032197")   # Recombination and recombination regulation
 
-#extracting genes that belong to the specific GO terms of interest
-genes_by_term <- lapply(go_id, function(go) {
-  # select genes where the GO term is in their vector of GO terms
-  names(gene2go)[sapply(gene2go, function(x) go %in% unlist(x))]
-})
-names(genes_by_term) <- go_id
-genes_by_term
+for (i in 1:nrow(TE_loc_filtered)) {
+  
+genesize <- TE_loc_filtered$V2[i]:TE_loc_filtered$V3[i]
 
-#checking the raw data just in case. Should be the same # of genes in genes_for_terms
-tonsa_go %>% filter(GO %in% go_id) %>% pull(geneID)  
+check <- SEA2_loci_pvals|> dplyr::filter(SEA2_loci_pvals$position %in% genesize)
+
+if(nrow(check)!=0){
+  num_nonsig <- num_nonsig + nrow(check)
+}
+
+i <- i+1
+}
+
+
+
+for (i in 1:nrow(TE_loc_filtered)) {
+  
+tempgene <- TE_loc_filtered[i,]  
+  
+genesize <- TE_loc_filtered$V2[i]:TE_loc_filtered$V3[i]
+
+check <- SEA2_outliers_PC1 |> dplyr::filter(SEA2_outliers_PC1$position %in% genesize)
+
+if(nrow(check)!=0){
+  SEA1_TE_selection_genes <- rbind(SEA1_TE_selection_genes, tempgene)
+  }
+
+SEA1_TE_selection_snps <- rbind(SEA1_TE_selection_snps, check)
+
+i <- i+1
+}
+
+
+highlights <- SEA1_TE_selection_snps$position
+SEA1_TE_selection_genes[,'genes']=sub("\\_i.*", "", SEA1_TE_selection_genes$V4)
+
+length(unique(SEA1_TE_selection_genes$genes))
+#132 genes with SNPs under selection
+nrow(SEA1_TE_selection_snps)
+# 273 SNPs under selection
+
+
 ```
+
 
 
 ```{r}
-TE_loc <- read.table("/gpfs1/cl/ecogen/pbio6800/GroupProjects/tripods/results/mapping/trinity_to_genome.bed")
+# Libraries ====
+library(readr)
+library(ggrepel)
+library(ggplot2)
+library(dplyr)
+library(RColorBrewer)
 
-TE_loc_filter <- TE_loc |> filter(
-  V4==TE_genes
-)
+mypalette <- c("#E2709A", "#CB4577", "#BD215B", "#970F42", "#75002B") # chr color palette
+#mysnps <- c("rs11801961","rs116558464","rs61703161") # snps to highlight
+sig = 5e-6 # significant threshold line
+sugg = 1e-4 # suggestive threshold line
 
-filtered_vector <- TE_loc |> filter(V4==(TE_loc$V4 %in% TE_genes))
+gg.manhattan <- function(df, threshold, hlight, col, ylims, title){
+  # format df
+  df.tmp <- df %>% 
+    
+    # Compute chromosome size
+    group_by(CHR) %>% 
+    summarise(chr_len=max(BP)) %>% 
+    
+    # Calculate cumulative position of each chromosome
+    mutate(tot=cumsum(chr_len)-chr_len) %>%
+    dplyr::select(-chr_len) %>%
+    
+    # Add this info to the initial dataset
+    left_join(df, ., by=c("CHR"="CHR")) %>%
+    
+    # Add a cumulative position of each SNP
+    arrange(CHR, BP) %>%
+    mutate( BPcum=BP+tot) %>%
+    
+    # Add highlight and annotation information
+    mutate( is_highlight=ifelse(SNP %in% hlight, "yes", "no")) %>%
+    mutate( is_annotate=ifelse(P < threshold, "yes", "no"))
+  
+  # get chromosome center positions for x-axis
+  axisdf <- df.tmp %>% group_by(CHR) %>% summarize(center=( max(BPcum) + min(BPcum) ) / 2 )
+  
+  ggplot(df.tmp, aes(x=BPcum, y=-log10(P))) +
+    # Show all points
+    geom_point(aes(color=as.factor(CHR)), alpha=0.8, size=2) +
+    scale_color_manual(values = rep(col, 22 )) +
 
-
-
-
+    # custom X axis:
+    scale_x_continuous( label = axisdf$CHR, breaks= axisdf$center ) +
+    scale_y_continuous(expand = c(0, 0), limits = ylims) + # expand=c(0,0)removes space between plot area and x axis 
+    
+    # add plot and axis titles
+    ggtitle(paste0(title)) +
+    labs(x = "Chromosome") +
+    
+    # add genome-wide sig and sugg lines
+    geom_hline(yintercept = -log10(sig)) +
+    geom_hline(yintercept = -log10(sugg), linetype="dashed") +
+    
+    # Add highlighted points
+    geom_point(data=subset(df.tmp, is_highlight=="yes"), color="orange", size=2) +
+    
+    # Add label using ggrepel to avoid overlapping
+    geom_label_repel(data=df.tmp[df.tmp$is_annotate=="yes",], aes(label=as.factor(SNP), alpha=0.7), size=5, force=1.3) +
+    
+    # Custom the theme:
+    theme_bw(base_size = 22) +
+    theme( 
+      plot.title = element_text(hjust = 0.5),
+      legend.position="none",
+      panel.border = element_blank(),
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.x = element_blank(),
+      axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1)
+    )
+}
 ```
 
+```{r}
+SEA2_loci_pvals_man <- data.frame(SNP = row.names(SEA2_loci_pvals), SEA2_loci_pvals) |> dplyr::select(
+  "SNP"=position,
+  "CHR"=chromo,
+  "BP"=position,
+  "P"=p_PC1
+  )
+
+#SEA2_loci_pvals_man <- transform(SEA2_loci_pvals_man, chromo_num = as.numeric(chromo_num))
+
+
+mypalette <- c("#E2709A", "#CB4577", "#BD215B", "#970F42", "#75002B")
+
+gg.manhattan(
+  SEA2_loci_pvals_man,
+  threshold = NA,
+  hlight = highlights,
+  col = mypalette,
+  title = "New Brunswick Seasonal Selection",
+  ylims=c(0,10)
+)
+
+```
