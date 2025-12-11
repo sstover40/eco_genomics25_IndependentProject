@@ -1,0 +1,535 @@
+---
+title: "Ecological Genomics Final Project"
+author: "Aidan Jones"
+date: "2025-11-01"
+output: html_document
+---
+
+## Ecological Genomics Final Project - Transposable Element Enrichment
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "/users/a/j/ajones76/projects/eco_genomics_2025/final_project/mydata")
+```
+
+### Import required libraries and dependencies
+
+```{r, message = FALSE, warning = FALSE}
+# Data manipulation and plotting functions
+library(tidyverse)
+
+# Data frame construction
+library(tibble)
+
+# Clean annotation fields
+library(stringr)
+
+# Differential gene expression calculations
+library(DESeq2)
+
+# Genomic interval operations
+library(GenomicRanges)
+
+# Import sequence coordinates
+library(rtracklayer)
+
+# Sequence parsing and manipulation
+library(Biostrings)
+
+# Sequence motif scanning
+library(motifmatchr)
+
+# JASPAR interface to convert motif objects
+library(TFBSTools)
+
+# Generate clustering heatmaps
+library(pheatmap)
+```
+
+## Import counts matrix and sample distibution table
+
+```{r, warning = FALSE}
+# Import the counts matrix
+countsTable <- read.table("DESeq2/counts_matrix.txt", header=TRUE, row.names=1)
+
+# Round counts to integers such that they are compatible with DESeq2
+countsTableRound <- round(countsTable)
+
+# Import the sample description table
+conds <- read.delim("DESeq2/metadata.txt", 
+                    header=TRUE, 
+                    stringsAsFactors = TRUE, 
+                    row.names=1)
+
+# Correct column names to match between the metadata and the counts matrix
+colnames(countsTableRound) <- substr(colnames(countsTableRound), 
+                                     start = 1, 
+                                     stop = 4)
+```
+
+### Run DESeq2 to test for differential gene expression
+
+```{r, warning = FALSE}
+# Create a DESeq object and define the experimental design
+dds <- DESeqDataSetFromMatrix(countData = countsTableRound, colData=conds, 
+                              design= ~ generation + line + generation:line)
+
+# Filter out genes with too few reads (genes with less than 15 counts in more than 75% of samples)
+dds <- dds[rowSums(counts(dds) >= 15) >= 18,]
+
+# Relevel factors by defining reference for line and generation
+dds$line <- relevel(dds$line, ref = "control")
+dds$generation <- relevel(dds$generation, ref = "G1")
+
+# Run the DESeq model to test for differential gene expression
+dds$group <- factor(paste0(dds$line, dds$generation))
+design(dds) <- ~ group
+dds <- DESeq(dds)
+
+# List the result names generated
+resultsNames(dds)
+```
+
+### Set up contrast and extract DEGs
+
+```{r, warning = FALSE}
+# Set up contrast between control G1 and treatment G1
+resG1_CvT <- results(dds, 
+                     contrast=c("group","controlG1","treatmentG1"), 
+                     alpha = 0.05)
+
+# Clean results table
+resG1_CvT <- resG1_CvT[order(resG1_CvT$padj), ]
+resG1_CvT <- resG1_CvT[!is.na(resG1_CvT$padj), ]
+
+# Extract DEGs (padj < 0.05)
+degs_G1_CvT <- rownames(resG1_CvT[resG1_CvT$padj < 0.05, ])
+```
+
+### Import gene localities and TE annotations
+
+```{r, warning = FALSE}
+# Import minimap2 BED with genomic positions for every gene mapped to the reference genome from the reference transcriptome (generated from tonsa_mapping.sh)
+genes_df <- read.table(
+  "MiniMap2/trinity_to_genome.bed", sep="\t", header=FALSE,
+  col.names=c("chr", "start", "end", "gene", "score", "strand")
+)
+
+# Keep genes that passed DESeq2 filtering
+dds_genes <- rownames(dds)
+genes_df <- genes_df[genes_df$gene %in% dds_genes, ]
+
+# Convert dds gene list into GRanges object to store genes as genomic intervals
+genes_gr <- GRanges(
+  seqnames = genes_df$chr,
+  ranges = IRanges(start = genes_df$start, end = genes_df$end),
+  strand = genes_df$strand,
+  gene = genes_df$gene
+)
+
+# Import RepeatMasker GFF with IDs, family associations, and genomic positions for every repetitive element masked by RepeatMasker and store as GRanges object
+tes_gr <- import.gff1("RepeatMasker/acar2_round_2_trimmed.fasta.out.gff")
+```
+
+### Wilcoxon test for TE proximity
+
+```{r, warning = FALSE}
+# Compute the distance from each gene to its nearest TE annotation
+dist_nearest <- distanceToNearest(genes_gr, tes_gr)
+
+# Create a data frame of distance from TE annotation for each gene
+gene_distances <- data.frame(
+  gene = genes_gr$gene[queryHits(dist_nearest)],
+  distance = mcols(dist_nearest)$distance
+)
+
+# Label which genes are DEGs in the data frame
+gene_distances$is_DEG <- gene_distances$gene %in% degs_G1_CvT
+
+# Run Wilcoxon test to test whether DEGs are closer to TEs than non-DEGs
+wilcox.test(distance ~ is_DEG, data = gene_distances)
+```
+
+### Assign TE families
+
+```{r, warning = FALSE}
+# Assign TE annotation GRanges object as a dataframe
+tes_df <- as.data.frame(tes_gr)
+
+# Clean TE data frame to extract annotation IDs and motif names
+tes_df <- tes_df %>%
+  mutate(
+    ID = str_extract(group, "(?<=ID=)\\d+"),
+    motif_raw = str_extract(group, '(?<=Target ")[^"]+'),
+    motif = str_remove(motif_raw, "^Motif:")
+  ) %>%
+  select(-group, -motif_raw)
+
+# Remove TE annotations without motif names
+tes_df <- tes_df[!is.na(tes_df$motif), ]
+
+# Exclude simple repeats and low-complexity regions
+tes_df <- tes_df[!grepl("^\\(", tes_df$motif), ]
+tes_df <- tes_df[!grepl("^[ATCG]+-rich", tes_df$motif), ]
+
+# Exclude structural elements
+tes_df <- tes_df[!grepl("^tRNA", tes_df$motif), ]
+tes_df <- tes_df[!grepl("^7S", tes_df$motif), ]
+tes_df <- tes_df[!grepl("^5S", tes_df$motif), ]
+tes_df <- tes_df[!grepl("^[LSUSSU]+-rRNA", tes_df$motif), ]
+
+# Filter TE families based on minimum occurrence in the genome
+min_TE_count <- 10
+te_counts <- table(tes_df$motif)
+keep_classes <- names(te_counts[te_counts >= min_TE_count])
+tes_df <- tes_df[tes_df$motif %in% keep_classes, ]
+
+# Add updated information to the TE annotation GRanges object
+tes_gr <- GRanges(
+  seqnames = tes_df$seqnames,
+  ranges = IRanges(start = tes_df$start, end = tes_df$end),
+  strand = tes_df$strand,
+  ID = tes_df$ID,
+  TE_family = tes_df$motif
+)
+```
+
+### Create windows and identify overlaps with genes and TE families
+
+```{r, warning = FALSE}
+# Define promoter region size
+promoter_size <- 5000
+
+# Extend gene bodies by concatenating promoter region with strand awareness
+gene_windows <- promoters(genes_gr,
+                          upstream = promoter_size,
+                          downstream = width(genes_gr))
+
+# Split TE annotations by defined family
+te_families <- split(tes_gr, tes_gr$TE_family)
+
+# Build presence/absence table for each TE family near each gene
+gene_TE_presence_matrix <- lapply(names(te_families), function(cl) {
+  
+  # Select TE annotations belonging to a single TE family
+  tes_sub <- te_families[[cl]]
+  
+  # Find overlaps between genes and the TE family
+  hits <- findOverlaps(gene_windows, tes_sub)
+  
+  # Create a logical vector indicating which genes have the TE family
+  has_TE_family <- logical(length(genes_gr))
+  if (length(hits) > 0) {
+    has_TE_family[queryHits(hits)] <- TRUE
+  }
+  
+  # Return a data frame for the TE family
+  data.frame(
+    gene = genes_gr$gene,
+    TE_family = cl,
+    has_TE = has_TE_family
+  )
+})
+
+# Combine all TE families into a single data frame
+gene_TE_df <- bind_rows(gene_TE_presence_matrix)
+
+# Add DEG status
+gene_TE_df <- gene_TE_df %>%
+  mutate(is_DEG = gene %in% degs_G1_CvT)
+```
+
+### Run Fisher's exact tests for each TE family
+
+```{r, warning = FALSE}
+# Define function that takes the DEG vector list and the TE hit data frame
+fisher_function <- function(gene_TE_df){
+
+  # Group TE hit data frame by family
+  raw_results <- gene_TE_df %>%
+    group_by(TE_family) %>%
+    group_modify(~{
+      
+      # Build contingency table
+      tab <- table(.x$is_DEG, .x$has_TE)
+      
+      # Extract counts for each quadrant
+      DEG_TE <- if(
+        "TRUE" %in% rownames(tab) & 
+        "TRUE" %in% colnames(tab))tab["TRUE","TRUE"] else 0
+      DEG_noTE <- if(
+        "TRUE" %in% rownames(tab) & 
+        "FALSE" %in% colnames(tab)) tab["TRUE","FALSE"] else 0
+      nonDEG_TE <- if(
+        "FALSE" %in% rownames(tab) & 
+        "TRUE" %in% colnames(tab)) tab["FALSE","TRUE"] else 0
+      nonDEG_noTE <- if(
+        "FALSE" %in% rownames(tab) & 
+        "FALSE" %in% colnames(tab)) tab["FALSE","FALSE"] else 0
+
+      # Run Fisher's exact test for complete tables 
+      if(all(dim(tab) == c(2,2))) {
+        ft <- fisher.test(tab)
+        data.frame(
+          p_value = ft$p.value,
+          odds_ratio = as.numeric(ft$estimate),
+          DEG_TE = DEG_TE,
+          DEG_noTE = DEG_noTE,
+          nonDEG_TE = nonDEG_TE,
+          nonDEG_noTE = nonDEG_noTE,
+          valid_test = TRUE
+        )
+      } else {
+        data.frame(
+          p_value = NA,
+          odds_ratio = NA,
+          DEG_TE = DEG_TE,
+          DEG_noTE = DEG_noTE,
+          nonDEG_TE = nonDEG_TE,
+          nonDEG_noTE = nonDEG_noTE,
+          valid_test = FALSE
+        )
+      }
+    }) %>%
+    ungroup()
+
+  # Apply Benjamini–Hochberg FDR correction
+  raw_results <- raw_results %>%
+    mutate(p_adj = ifelse(valid_test,p.adjust(p_value, method = "fdr"), NA))
+  
+  return(raw_results)
+}
+
+# Run the Fisher's exact test function
+fisher_results <- fisher_function(gene_TE_df = gene_TE_df)
+```
+
+### Barplot of enriched TE families near DEGs
+
+```{r, warning = FALSE}
+# Mapping TE families with broader transposon classes
+te_class_map <- data.frame(
+  TE_family = c("PiggyBac_A.marissinica_182",
+                "hAT-N137_DR",
+                "PIF-Harbinger_A.marissinica_172",
+                "TE2948_SO2_FAM1039",
+                "DF003450183",
+                "Helitron-like-6a_Hmel",
+                "DF003447903",
+                "DF003448132",
+                "LINE_P.maximus_88_cons"),
+  TE_class = c("DNA Transposon", 
+               "DNA Transposon", 
+               "DNA Transposon", 
+               "Unclassified", 
+               "Unclassified", 
+               "DNA Transposon", 
+               "Unclassified",
+               "Unclassified",
+               "LINE")
+)
+
+# Prepare Fisher's exact test results for plotting
+fisher_plot_df <- fisher_results %>%
+  mutate(
+    log2_or = log2(odds_ratio)) %>%
+  left_join(te_class_map, by = "TE_family") %>% 
+  filter(p_adj < 0.05)
+
+# Define colors for the broad categories
+te_class_colors <- c(
+  "LINE" = "red",
+  "DNA Transposon" = "blue",
+  "Unclassified" = "grey50"
+)
+
+# Plot enriched TE families
+ggplot(fisher_plot_df,
+       aes(x = reorder(TE_family, log2_or),
+           y = log2_or,
+           fill = TE_class)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = te_class_colors, name = "TE Class") +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(
+    title = "Enriched TE Families Near DEGs (FDR < 0.05)",
+    y = "log2(Odds Ratio)",
+    x = "TE Family"
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "right",
+    axis.text.y = element_text(size = 10)
+  )
+```
+
+### Extract TE sequences from enriched TE families
+
+```{r, warning = FALSE}
+# Identify significantly enriched TE families
+enriched_families <- fisher_results %>% 
+  filter(p_adj < 0.05) %>% 
+  pull(TE_family) %>%
+  unique()
+
+# Load the reference genome
+genome <- readDNAStringSet("RepeatMasker/acar2_round_2_trimmed.fasta")
+
+# Split all TE annotation genomic ranges by TE family
+te_by_family <- split(tes_gr, tes_gr$TE_family)
+
+# Prepare an empty list to store TE sequences
+te_sequences <- list()
+
+# Loop through each enirhced TE family
+for (fam in enriched_families) {
+  
+  # Retrieve GRanges intervals for the sequences of the TE family
+  gr <- te_by_family[[fam]]
+  
+  # Extract corresponding DNA sequences from the genome
+  seqs <- getSeq(genome, gr)
+
+  # Label each DNA equence 
+  names(seqs) <- paste0(
+    fam, "_", 
+    gr$TE_ID, "_", 
+    seqnames(gr), ":", 
+    start(gr), "-", end(gr))
+
+  # Store in the TE sequences list
+  te_sequences[[fam]] <- seqs
+  
+  # Write FASTA containing TE sequences
+  writeXStringSet(seqs, 
+                  filepath = paste0("MotifMatchr", 
+                                    "/", 
+                                    "TE_family_", 
+                                    fam, 
+                                    ".fasta"))
+}
+```
+
+### Scan TE sequences for know invertebrate TF binding motifs
+
+```{r, warning = FALSE}
+# Load JASPAR invertebrate TF motif position frequency matrix
+jaspar_file <- "MotifMatchr/JASPAR2026_CORE_insects_non-redundant_pfms_jaspar.txt"
+pfm_list <- readJASPARMatrix(jaspar_file, matrixClass = "PFM")
+
+# Extract the JASPAR IDs from each motif 
+motif_ids <- sapply(pfm_list, function(x) ID(x))
+names(pfm_list) <- motif_ids
+
+# Convert position frequency matrix to position weight matrix
+jaspar_pwms <- toPWM(pfm_list)
+
+# Prepare an empty list to store motif hits
+motif_hits <- list()
+
+# Scan extracted sequences for each TE family for TF motif hits
+for (fam in names(te_sequences)) {
+  
+  # Retrieves DNA sequences for the TE family
+  seqs <- te_sequences[[fam]]
+  
+  # Scan each TE sequence copy against all JASPAR PWMs
+  hits <- matchMotifs(
+    pwm = jaspar_pwms,
+    subject = seqs,
+    out = "matches",
+    p.cutoff = 1e-4
+  )
+  
+  # Save binary matrix of motif matches per TE sequence
+  motif_hits[[fam]] <- hits
+}
+
+# Convert motif hits matrix to a tidy summary table
+motif_summary <- map_df(names(motif_hits), function(fam) {
+  mat <- assay(motif_hits[[fam]], "motifMatches")
+  rownames(mat) <- names(jaspar_pwms)[1:nrow(mat)]
+  
+  # Build table outlining the number of TE copies that contain a specific motif
+  tibble(
+    TE_family = fam,
+    motif_id = rownames(mat),
+    n_TE_copies = rowSums(mat))
+  }
+)
+
+# Collapse potential motif duplicates
+motif_counts <- motif_summary %>%
+  group_by(TE_family, motif_id) %>%
+  summarise(n_TE_copies = sum(n_TE_copies), .groups = "drop")
+
+# Create a wide presence/absence matrix for each motif in every enriched TE family
+motif_matrix <- motif_counts %>%
+  mutate(present = ifelse(n_TE_copies > 0, 1, 0)) %>%
+  select(TE_family, motif_id, present) %>%
+  pivot_wider(names_from = motif_id, values_from = present, values_fill = 0)
+
+# Remove motifs that do not appear in any TE family
+motif_matrix_filtered <- motif_matrix %>%
+  select(TE_family, which(colSums(.[,-1]) > 0) + 1)
+```
+
+### Investigate TF motif abundance in enriched TE families
+
+```{r}
+# Identify top 25 motifs across all enriched TE families based on total abundance
+top_motifs <- motif_summary %>%
+  filter(!is.na(motif_id)) %>%
+  group_by(motif_id) %>%
+  summarise(total_hits = sum(n_TE_copies), .groups = "drop") %>%
+  arrange(desc(total_hits)) %>%
+  slice_head(n = 25)
+
+# Extract top motif IDs
+top_motifs_ids <- top_motifs$motif_id
+
+# Extract motif names from the JASPAR PWM
+motif_names <- sapply(jaspar_pwms, function(x) x@name)
+names(motif_names) <- names(jaspar_pwms)
+
+# Filter motif summary to top motif hits
+motif_summary_top <- motif_summary %>%
+  filter(!is.na(motif_id), motif_id %in% top_motifs_ids) %>%
+  mutate(motif_name = motif_names[motif_id])
+
+# Compute the number of TE copies in each TE family
+te_family_sizes <- sapply(te_sequences, length)
+
+# Compute the percentage of TE sequences containing each motif
+motif_percent <- motif_summary_top %>%
+  rowwise() %>%
+  mutate(percent_with_motif = n_TE_copies / te_family_sizes[[TE_family]] * 100) %>%
+  ungroup() %>%
+  select(TE_family, motif_name, percent_with_motif)
+
+# Pivot from long to wide format
+motif_matrix_percent <- motif_percent %>%
+  pivot_wider(names_from = motif_name, 
+              values_from = percent_with_motif, 
+              values_fill = 0)
+
+# Convert to numeric matrix
+heatmap_mat_percent <- motif_matrix_percent %>%
+  column_to_rownames("TE_family") %>%
+  as.matrix()
+
+# Plot clustering heatmap showing TF motif abundance in each enriched TE family
+colors <- colorRampPalette(c("white", "black"))(100)
+pheatmap(
+  heatmap_mat_percent,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  display_numbers = FALSE,
+  color = colors,
+  legend = TRUE,
+  fontsize_row = 10,
+  fontsize_col = 10,
+  main = "Top 25 TF Motifs (% of TE sequences)\n in Enriched TE Families"
+)
+```
